@@ -21,7 +21,7 @@ class MetaRegressionDataset:
                  y_transformer=None, task_descriptor_transformer=None,
                  raw_inputs=False, max_examples_per_episode=None,
                  max_test_examples=None, is_test=False, seed=42,
-                 nb_query_samples=0, y_scaler=None, extrapolation_strategy=None,
+                 nb_query_samples=0, y_scaler=None,
                  nb_test_time_replicates=20, **kwargs):
         super(MetaRegressionDataset, self).__init__()
         assert nb_query_samples >= 0, "nb_query_samples must be non negative"
@@ -34,8 +34,6 @@ class MetaRegressionDataset:
         self.nb_query_samples = nb_query_samples
         self.y_scaler = y_scaler
         self.nb_test_time_replicates = nb_test_time_replicates
-
-        self.extrapolation_strategy = extrapolation_strategy
 
         if x_transformer is None:
             self.x_transformer = lambda x: torch.FloatTensor(x)
@@ -141,114 +139,25 @@ class MetaRegressionDataset:
         x, y, task_descriptor, scaler = self.episode_loader(filename, self.y_scaler)
         n, indexes = len(x), np.arange(len(x))
 
-        if self.extrapolation_strategy is None:
-            self.rgn.shuffle(indexes)
+        self.rgn.shuffle(indexes)
 
-            if self.is_test:
-                if self.max_examples_per_episode < 1:
-                    train_indexes, test_indexes = train_test_split(indexes, train_size=self.max_examples_per_episode)
-                else:
-                    k = min(int(n / 2), self.max_examples_per_episode)
-                    train_indexes, test_indexes = indexes[:k], indexes[k:k + self.max_test_examples]
-                    remaining_indexes = indexes[k + self.max_test_examples:]
+        if self.is_test:
+            if self.max_examples_per_episode < 1:
+                train_indexes, test_indexes = train_test_split(indexes, train_size=self.max_examples_per_episode)
             else:
-                n = min(2 * self.max_examples_per_episode, n)
-                temp_indexes = indexes[:n]
-                k = int(n / 2)
-                train_indexes, test_indexes = temp_indexes[:k], temp_indexes[k:(2 * k)]
-                remaining_indexes = indexes[2 * k:]
-            y_train = y[train_indexes]
-            std_zero = np.std(y[train_indexes]) == 0
-            if std_zero:
-                y_train = np.array(y_train) + np.random.normal(0, np.abs(np.mean(y_train) / 10.0) + 1e-8)
-
-        elif self.extrapolation_strategy == 'leftrighty':
-
-            sorted_index = np.argsort(y.reshape(-1))
-
-            index = self.rgn.choice(np.arange(int(.2 * n), int(.8 * n) + 1))
-
-            train_on_left = self.rgn.randint(2)
-
-            if train_on_left:
-                train, test = sorted_index[:index], sorted_index[index:]
-            else:
-                test, train = sorted_index[:index], sorted_index[index:]
-
-            self.rgn.shuffle(train)
-            self.rgn.shuffle(test)
-
-            n_train, n_test = len(train), len(test)
-
-            if self.is_test:
-                if self.max_examples_per_episode < 1:
-                    if not train_on_left:
-                        sorted_index = sorted_index[::-1]
-                    train_indexes, test_indexes = train_test_split(
-                        sorted_index,
-                        train_size=self.max_examples_per_episode,
-                        shuffle=False,
-                    )
-                else:
-                    k_train = min(n_train, self.max_examples_per_episode)
-
-                    train_indexes, test_indexes = train[:k_train], test[:self.max_test_examples]
-                    remaining_indexes = np.concatenate([test[self.max_test_examples:], train[k_train:]])
-            else:
-                k_train = min(n_train, self.max_examples_per_episode)
-                k_test = min(n_test, self.max_examples_per_episode)
-
-                train_indexes, test_indexes = train[:k_train], test[:k_test]
-                remaining_indexes = np.concatenate([test[k_test:], train[k_train:]])
-
-            y_train = y[train_indexes]
-            std_zero = np.std(y[train_indexes]) == 0
-            if std_zero:
-                y_train = np.array(y_train) + np.random.normal(0, np.abs(np.mean(y_train) / 10.0) + 1e-8)
-
-        elif self.extrapolation_strategy == 'leftrightx':
-
-            sorted_index = np.argsort(x.reshape(-1))
-
-            index = self.rgn.choice(np.arange(int(.2 * n), int(.8 * n) + 1))
-
-            train_on_left = self.rgn.randint(2)
-
-            if train_on_left:
-                train, test = sorted_index[:index], sorted_index[index:]
-            else:
-                test, train = sorted_index[:index], sorted_index[index:]
-
-            self.rgn.shuffle(train)
-            self.rgn.shuffle(test)
-
-            n_train, n_test = len(train), len(test)
-
-            if self.is_test:
-                if self.max_examples_per_episode < 1:
-                    if not train_on_left:
-                        sorted_index = sorted_index[::-1]
-                    train_indexes, test_indexes = train_test_split(
-                        sorted_index,
-                        train_size=self.max_examples_per_episode,
-                        shuffle=False,
-                    )
-                else:
-                    k_train = min(n_train, self.max_examples_per_episode)
-
-                    train_indexes, test_indexes = train[:k_train], test[:self.max_test_examples]
-                    remaining_indexes = np.concatenate([test[self.max_test_examples:], train[k_train:]])
-            else:
-                k_train = min(n_train, self.max_examples_per_episode)
-                k_test = min(n_test, self.max_examples_per_episode)
-
-                train_indexes, test_indexes = train[:k_train], test[:k_test]
-                remaining_indexes = np.concatenate([test[k_test:], train[k_train:]])
-
-            y_train = y[train_indexes]
-            std_zero = np.std(y[train_indexes]) == 0
-            if std_zero:
-                y_train = np.array(y_train) + np.random.normal(0, np.abs(np.mean(y_train) / 10.0) + 1e-8)
+                k = min(int(n / 2), self.max_examples_per_episode)
+                train_indexes, test_indexes = indexes[:k], indexes[k:k + self.max_test_examples]
+                remaining_indexes = indexes[k + self.max_test_examples:]
+        else:
+            n = min(2 * self.max_examples_per_episode, n)
+            temp_indexes = indexes[:n]
+            k = int(n / 2)
+            train_indexes, test_indexes = temp_indexes[:k], temp_indexes[k:(2 * k)]
+            remaining_indexes = indexes[2 * k:]
+        y_train = y[train_indexes]
+        std_zero = np.std(y[train_indexes]) == 0
+        if std_zero:
+            y_train = np.array(y_train) + np.random.normal(0, np.abs(np.mean(y_train) / 10.0) + 1e-8)
 
         if self.nb_query_samples > 0:
             if len(remaining_indexes) < self.nb_query_samples:

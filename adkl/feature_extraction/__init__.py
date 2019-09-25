@@ -7,9 +7,7 @@ from .utils import ClonableModule
 
 class FeaturesExtractorFactory:
     name_map = dict(
-        cnn=Cnn1dFeaturesExtractor,
-        fc=FcFeaturesExtractor,
-        gcnn=GINFeaturesExtractor)
+        fc=FcFeaturesExtractor)
 
     def __init__(self):
         super(FeaturesExtractorFactory, self).__init__()
