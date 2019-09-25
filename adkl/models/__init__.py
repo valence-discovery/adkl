@@ -5,7 +5,6 @@ from .metakrr_sk import MetaKrrSKLearner
 from .metakrr_mk import MetaKrrMKLearner
 from .metagp_mk import MetaGPMKLearner
 from .fp_learner import FPLearner
-# from .seq2seq_fp import Seq2SeqLearner
 from .cnp import CNPLearner
 from .irl_matching_nets import IrlMachtingNetLearner
 from .multitask import MultiTaskLearner
@@ -13,7 +12,6 @@ from .task_encoder import TaskEncoderLearner
 from .light_bmaml import LightBMAML
 from .proto_maml import ProtoMAML
 from .learned_basis import LearnedBasisFunctions
-from .anp import AttentiveNeuralProcess
 from .r2d2 import R2D2Learner
 from .single_task_learner import STLearner
 from .metakrr_mk2 import MetaKrrMKLearner2, MetaGPMKLearner2
@@ -30,7 +28,6 @@ class ModelFactory:
         metagp_mk=MetaGPMKLearner,
         metagp_mk2=MetaGPMKLearner2,
         fingerprint=FPLearner,
-        # seqtoseq=Seq2SeqLearner,
         cnp=CNPLearner,
         irl=IrlMachtingNetLearner,
         multitask=MultiTaskLearner,
@@ -38,7 +35,6 @@ class ModelFactory:
         bmaml=LightBMAML,
         protomaml=ProtoMAML,
         learned_basis=LearnedBasisFunctions,
-        anp=AttentiveNeuralProcess,
         r2d2=R2D2Learner,
         single_task=STLearner
     )
