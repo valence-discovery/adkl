@@ -4,7 +4,7 @@ from os.path import join, dirname, realpath
 import numpy as np
 import torch
 from PIL import Image
-from adkl.feature_extraction import SequenceTransformer, AdjGraphTransformer, FingerprintsTransformer
+from adkl.feature_extraction import FingerprintsTransformer
 from adkl.feature_extraction.constants import AMINO_ACID_ALPHABET, SMILES_ALPHABET, ATOM_LIST
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -55,15 +55,7 @@ class MetaRegressionDataset:
 
     def init_tasks_sizes(self):
         def file_len(fname):
-            if fname[-4:] in {'.png', '.jpg'}:
-                img = Image.open(fname)
-                sizes = to_tensor(img).size()
-                i = 1
-                for size in sizes:
-                    i *= size
-                return i
-
-            elif fname.startswith('__'):
+            if fname.startswith('__'):
                 return int(fname.split('__')[1])
 
             elif fname.endswith('.dat'):
@@ -196,77 +188,17 @@ class MoleculeMetaDataset(MetaRegressionDataset):
         if kwargs.get('nb_query_samples', 0) > 0:
             raise Exception("Active learning mode not supported for this dataset yet")
 
-        y_epsilon = 1e-7
-
         self.representation = representation.lower()
 
-        if self.representation == 'graph':
-            transformer = AdjGraphTransformer()
-        elif self.representation == 'smiles':
-            transformer = SequenceTransformer(SMILES_ALPHABET, returnTensor=True, one_hot=False)
-        elif self.representation.startswith('ecfp'):
+        if self.representation.startswith('ecfp'):
             transformer = FingerprintsTransformer(kind=self.representation, length=length)
         else:
             raise AttributeError(f'{self.representation} is not implemented')
 
-        prot_transformer = SequenceTransformer(AMINO_ACID_ALPHABET)
         self.x_transformer = lambda x: transformer.transform(x)
-        self.y_transformer = lambda y: torch.FloatTensor(y)
-        self.task_descr_transformer = lambda z: None if z is None else prot_transformer.transform([z])[0]
-        self.max_test_examples = 1000
-        self.vocab = SMILES_ALPHABET if self.representation != 'graph' else ATOM_LIST
-
-    def _episode(self, xtrain, ytrain, xtest, ytest, task_descriptor=None, idx=None, xquery=None, yquery=None):
-        if self.representation != 'graph':
-            return super(MoleculeMetaDataset, self)._episode(
-                xtrain=xtrain, ytrain=ytrain, xtest=xtest, ytest=ytest, xquery=xquery, yquery=yquery,
-                task_descriptor=task_descriptor, idx=idx
-            )
-
-        ntrain = len(xtrain)
-        temp = self.x_transformer(np.concatenate([xtrain, xtest]))
-        G, feat = zip(*temp)
-        temp = [(self.cuda_tensor(G[i]), self.cuda_tensor(feat[i])) for i in range(len(G))]
-        xtrain, xtest = temp[:ntrain], temp[ntrain:]
-        temp = self.y_transformer(np.concatenate([ytrain, ytest]))
-        ytrain, ytest = temp[:ntrain], temp[ntrain:]
-
-        if task_descriptor is not None:
-            task_descriptor = self.task_descriptor_transformer(task_descriptor)
-            td = dict(task_descr=self.cuda_tensor(task_descriptor))
-        else:
-            td = dict()
-
-        return (dict(Dtrain=(xtrain, self.cuda_tensor(ytrain)),
-                     Dtest=(xtest, self.cuda_tensor(ytest)),
-                     idx=idx,
-                     **td),
-                self.cuda_tensor(ytest))
-
-
-class ImageMetaDataset(MetaRegressionDataset):
-    def __init__(self, *args, **kwargs):
-        super(ImageMetaDataset, self).__init__(*args, **kwargs)
-        if kwargs.get('nb_query_samples', 0) > 0:
-            raise Exception("Active learning mode not supported for this dataset yet")
-
-        y_epsilon = 1e-7
-
-        self.x_transformer = lambda x: transformery.transform(x)
         self.y_transformer = lambda y: torch.FloatTensor(y)
         self.task_descr_transformer = lambda z: None
         self.max_test_examples = 1000
-        self.vocab = SMILES_ALPHABET if not use_graph else ATOM_LIST
-
-        transform = transforms.Compose([
-            transforms.Scale(image_size),
-            # transforms.Resize(image_size),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
-
-        dataset = ImageFolder(IMAGE_PATH, transform)
-        data_loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last=True)
 
 
 class MetaDataLoader(object):

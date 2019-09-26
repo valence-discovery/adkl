@@ -127,7 +127,7 @@ def __get_episode_loader(dataset_name):
     DATASETS_MAPPING = dict(
         antibacterial=(lambda x, y: episode_loader_molecules(x, skip=0, y_scaler=y)),
         binding=(lambda x, y: episode_loader_molecules(x, skip=2, y_scaler=y)),
-        sinusoidals=(lambda x, y: episode_loader_harmonics(x, skip=3, y_scaler=y)),,
+        sinusoidals=(lambda x, y: episode_loader_harmonics(x, skip=3, y_scaler=y)),
     )
 
     if dataset_name not in DATASETS_MAPPING:

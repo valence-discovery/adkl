@@ -1,7 +1,5 @@
-from .cnn import ClonableModule, Cnn1dFeaturesExtractor
 from .fc import FcFeaturesExtractor
-from .gin import GINFeaturesExtractor
-from .transformers import AdjGraphTransformer, SequenceTransformer, FingerprintsTransformer
+from .transformers import FingerprintsTransformer
 from .utils import ClonableModule
 
 

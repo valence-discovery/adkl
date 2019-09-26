@@ -1,6 +1,4 @@
-import warnings
 from collections import OrderedDict
-from itertools import zip_longest
 
 import numpy as np
 import scipy.sparse as ss
@@ -14,10 +12,6 @@ from rdkit.Chem.rdMolDescriptors import GetHashedAtomPairFingerprintAsBitVect, \
 from rdkit.Chem.rdmolops import RDKFingerprint, RenumberAtoms
 from rdkit.DataStructs.cDataStructs import ExplicitBitVect
 from sklearn.base import TransformerMixin
-
-from .constants import (
-    ATOM_LIST, ATOM_DEGREE_LIST, ATOM_NUM_H,
-    BOND_TYPES, IMPLICIT_VALENCE, CHIRALITY_LIST, HYBRIDATION_LIST)
 
 
 def normalize_adj(adj):

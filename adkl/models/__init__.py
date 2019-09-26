@@ -1,19 +1,19 @@
 from .maml import MAML
 from .cnp import CNPLearner
-from .light_bmaml import LightBMAML
+from .bmaml import BMAML
 from .proto_maml import ProtoMAML
 from .learned_basis import LearnedBasisFunctions
 from .r2d2 import R2D2Learner
-from .metakrr_mk2 import MetaKrrMKLearner2, MetaGPMKLearner2
+from .adkl import ADKL_KRR, ADKL_GP
 
 
 class ModelFactory:
     name_map = dict(
         maml=MAML,
-        metakrr_mk2=MetaKrrMKLearner2,
-        metagp_mk2=MetaGPMKLearner2,
+        adkl_krr=ADKL_KRR,
+        adkl_gp=ADKL_GP,
         cnp=CNPLearner,
-        bmaml=LightBMAML,
+        bmaml=BMAML,
         protomaml=ProtoMAML,
         learned_basis=LearnedBasisFunctions,
         r2d2=R2D2Learner

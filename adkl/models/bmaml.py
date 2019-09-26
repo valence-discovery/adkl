@@ -1,21 +1,15 @@
-from abc import ABC
-from collections import OrderedDict
-
 import numpy as np
 import torch
-from poutyne.framework import Callback
-from torch import nn
+from sklearn.metrics import r2_score
 from torch import autograd
+from torch import nn
 from torch.distributions.gamma import Gamma
 from torch.distributions.normal import Normal
-from torch.nn import Linear, Sequential
 from torch.nn.functional import mse_loss
 
 from adkl.feature_extraction import FeaturesExtractorFactory
-from adkl.feature_extraction.utils import ClonableModule
 from adkl.models.base import MetaLearnerRegression, MetaNetwork
-from adkl.models.utils import to_unit
-from .utils import set_params, vector_to_named_parameters,named_parameter_sizes
+from .utils import pack_episodes
 
 
 def check_nan(grads):
@@ -26,141 +20,32 @@ def check_nan(grads):
     return False
 
 
-def log_pdf(y, mu, kappa):
+def log_pdf(y, kappa):
     """
     Computes the log PDF of a spherical Gaussian.
 
     Parameters
     ----------
     y: torch.Tensor
-        The sample.
-    mu: torch.Tensor
-        The mean.
+        B * M * x tensor, representing the centered sample.
+        Depending on the use case, x is either N, the number of samples in the batch
+        or (D + 1), the number of parameters.
     kappa: torch.Tensor
-        The scale parameter (same parameterisation as BMAML paper).
+        B * M tensor, representing the scale parameter (same parametrisation as BMAML paper).
 
     Returns
     -------
-        The log PDF of a spherical Gaussian opf mean mu and scale parameter kappa.
+    log_p: torch.Tensor
+        B * M * x tensor (x = N or D + 1), the log PDF.
     """
 
-    log_p = Normal(mu.view(-1), 1 / kappa.pow(.5)).log_prob(y.view(-1)).sum()
+    # Adapting the dimension of kappa
+    kappa = kappa.unsqueeze(2)
+    kappa = kappa.expand(y.shape)
+
+    log_p = Normal(0, 1 / kappa.pow(.5)).log_prob(y)
+
     return log_p
-
-
-class Regressor(ClonableModule, ABC):
-    def __init__(self, feature_extractor_params, output_dim=1,
-                 a_likelihood=2., b_likelihood=.2, a_prior=2., b_prior=.2):
-        super(Regressor, self).__init__()
-        self._params = locals()
-        feature_extractor = FeaturesExtractorFactory()(**feature_extractor_params)
-        self.out_dim = output_dim
-        self.net = Sequential(feature_extractor, Linear(feature_extractor.output_dim, output_dim))
-
-        self.gamma_likelihood = Gamma(a_likelihood, b_likelihood)
-        self.gamma_prior = Gamma(a_prior, b_prior)
-
-        # We sample initial values for kappa_prior and kappa_likelihood
-        self.kappa_likelihood = torch.nn.Parameter(self.gamma_likelihood.rsample((1,)))
-        self.kappa_prior = torch.nn.Parameter(self.gamma_prior.rsample((1,)))
-
-        # # We need to register them in the autograd graph
-        # self.kappa_likelihood.requires_grad_(True)
-        # self.kappa_prior.requires_grad_(True)
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class MAMLNetwork(MetaNetwork, ABC):
-
-    def __init__(self, feature_extractor_params, loss=mse_loss, lr_chaser=0.02, lr_leader=None,
-                 a_likelihood=2., b_likelihood=.2, a_prior=2., b_prior=.2):
-        super(MAMLNetwork, self).__init__()
-        # feature_extractor = FeaturesExtractorFactory()(**feature_extractor_params)
-
-        if lr_leader is None:
-            lr_leader = lr_chaser / 10
-
-        self.lr_chaser = lr_chaser
-        self.lr_leader = lr_leader
-
-        self.base_learner = Regressor(feature_extractor_params, 1, a_likelihood=a_likelihood,
-                                      b_likelihood=b_likelihood, a_prior=a_prior, b_prior=b_prior)
-
-        self.loss = loss
-
-    def step(self, dataset):
-        """
-        Performs a single forward step.
-        (we cannot compute the update yet, since it depends on other particles).
-
-        This method returns either the log-posterior of the model, or the output.
-
-        Parameters
-        ----------
-        dataset: tuple(torch.Tensor)
-            The data for an episode (task) sampled from the task distribution.
-
-        Returns
-        -------
-        output: torch.Tensor
-            The output for the given episode.
-        """
-        x, y = dataset
-
-        output = self.base_learner(x)
-
-        return output
-
-    def posterior(self, dataset):
-        r"""
-        Given an output, returns the log-posterior of the model :
-
-        .. math::
-
-            p(\theta_\tau | D^{train}_\tau) & \propto p(D^{train}_\tau | \theta_\tau) p(\theta_\tau)\\
-            & = \prod_{(x, y) \in D^{train}_\tau} \mathcal{N}(y | f_\theta(x), \kappa_{l})
-            \prod_{w \in \theta_\tau} \mathcal{N}(w | 0, \kappa_{p})
-            \mathrm{Gamma}(\kappa_{l} | a, b) \mathrm{Gamma}(\kappa_{p} | a', b')
-
-        Where :math:`\kappa_l` and :math:`\kappa_p` are scaling parameters.
-
-        Parameters
-        ----------
-        dataset: torch.Tensor
-            The dataset on which to compute the posterior.
-
-        Returns
-        -------
-        objective: torch.Tensor
-            The log-posterior of the model, computed for a given output.
-        """
-
-        x, y = dataset
-        network = self.base_learner
-
-        # We first compute the output
-        output = self.step(dataset)
-
-        # We need access to the parameters to enforce a Gaussian prior
-        parameters = [
-            param for name, param in network.named_parameters()
-            if name not in {'kappa_likelihood', 'kappa_prior'}
-        ]
-        parameter_vector = torch.nn.utils.parameters_to_vector(parameters)
-
-        # kappa is a scaling parameter
-        log_likelihood = log_pdf(output, y, network.kappa_likelihood) + \
-            network.gamma_likelihood.log_prob(network.kappa_likelihood)
-
-        # We enforce a Gaussian prior
-        log_prior = log_pdf(parameter_vector, torch.zeros_like(parameter_vector), network.kappa_prior) + \
-            network.gamma_prior.log_prob(network.kappa_prior)
-
-        objective = log_likelihood + log_prior
-
-        return objective
 
 
 class MAMLParticles(MetaNetwork):
@@ -168,21 +53,31 @@ class MAMLParticles(MetaNetwork):
     Object that contains all the particles.
     """
 
-    def __init__(self, feature_extractor_params, loss=mse_loss, lr_chaser=0.001, lr_leader=None,
-                 n_epochs_chaser=1, n_epochs_predict=5, s_epochs_leader=1, m_particles=2, kernel_function='rbf'):
+    def __init__(self, feature_extractor_params, lr_chaser=0.001, lr_leader=None,
+                 n_epochs_chaser=1, n_epochs_predict=0, s_epochs_leader=1,
+                 m_particles=2, kernel_function='rbf', n_samples=10, a_likelihood=2., b_likelihood=.2,
+                 a_prior=2., b_prior=.2, use_mse=False):
         """
         Initialises the object.
 
         Parameters
         ----------
-        feature_extractor_params
-        loss
-        lr_chaser
-        lr_leader
-        n_epochs_chaser
-        s_epochs_leader
-        m_particles
-        kernel_function
+        feature_extractor_params: dict
+            Parameters for the feature extractor.
+        lr_chaser: float
+            Learning rate for the chaser
+        lr_leader: float
+            Learning rate for the leader
+        n_epochs_chaser: int
+            Number of steps to be performed by the chaser.
+        s_epochs_leader: int
+            Number of steps to be performed by the leader.
+        m_particles:
+            Number of particles.
+        kernel_function: str, {'rbf', 'quadratic'}
+            The kernel function to use.
+        use_mse: bool
+            Whether to use MSE loss or Chaser loss.
         """
 
         super(MAMLParticles, self).__init__()
@@ -204,71 +99,46 @@ class MAMLParticles(MetaNetwork):
 
         self.m_particles = m_particles
 
-        particles = [
-            MAMLNetwork(feature_extractor_params, loss=loss, lr_chaser=lr_chaser, lr_leader=lr_leader)
-            for _ in range(m_particles)
-        ]
+        self.n_samples = n_samples
 
-        self.particles = nn.Parameter(torch.stack(tuple([
-            torch.nn.utils.parameters_to_vector(particle.base_learner.parameters())
-            for particle in particles
-        ])))
+        self.feature_extractor = FeaturesExtractorFactory()(**feature_extractor_params)
+        self.fe_output_dim = self.feature_extractor.output_dim
 
-        self.networks = {
-            'prototype': MAMLNetwork(feature_extractor_params, loss=loss, lr_chaser=lr_chaser, lr_leader=lr_leader)
-        }
+        self.gamma_likelihood = Gamma(a_likelihood, b_likelihood)
+        self.gamma_prior = Gamma(a_prior, b_prior)
 
-        # Since 'n' > 'k', the kappas are always first in the
-        self.named_sizes = named_parameter_sizes(
-            self.networks['prototype']
+        # The particles only implement the last (linear) layer.
+        # The first two columns are the kappas (likelihood then prior)
+        self.particles = nn.Parameter(
+            torch.cat((
+                self.gamma_likelihood.sample((m_particles, 1)),
+                self.gamma_prior.sample((m_particles, 1)),
+                nn.init.kaiming_uniform(torch.empty((m_particles, self.fe_output_dim + 1))),
+            ), dim=1)
         )
 
-    def get_model(self, parameters):
-        """
-        Puts the parameters in the prototype empty shell.
+        self.loss = 0
 
-        Parameters
-        ----------
-        parameters: torch.Tensor
-            The parameters of a given particle.
+        self.use_mse = use_mse
 
-        Returns
-        -------
-        network: torch.nn.Module
-            The prototype attribute, filled with the new parameters.
-        """
+    @property
+    def return_var(self):
+        return True
 
-        # Check that the kappas are more than 0, for numerical stability.
-        if (parameters[:2] < 0).any():
-            parameters = torch.cat(
-                torch.clamp(parameters[:2], min=1e-8),
-                parameters[2:]
-            )
-
-        named_parameters = vector_to_named_parameters(
-            vec=parameters,
-            named_sizes=self.named_sizes
-        )
-
-        network = self.networks['prototype']
-        set_params(network, named_parameters)
-
-        return network
-
-    def kernel(self, parameter_vectors):
+    def kernel(self, weights):
         """
         Computes the cross-particle kernel. Given the stacked parameter vectors of the particles,
         outputs the kernel (be it RBF or quadratic).
 
         Parameters
         ----------
-        parameter_vectors: torch.Tensor
-            m x n tensor representing the full parametrisation of the particles.
+        weights: torch.Tensor
+            B * M * M * (D + 1) tensor. Expanded versions of the weights.
 
         Returns
         -------
         kernel: torch.Tensor
-            m x m tensor representing the cross-particle kernel.
+            B * M * M tensor representing the cross-particle kernel.
         """
 
         def rbf_kernel(pv):
@@ -286,8 +156,8 @@ class MAMLParticles(MetaNetwork):
                 A m x m torch tensor representing the kernel.
             """
 
-            x = pv - pv.transpose(0, 1)
-            x = - x.norm(2, dim=2).pow(2) / 2
+            x = pv - pv.transpose(1, 2)
+            x = - x.norm(2, dim=3).pow(2) / 2
             x = x.exp()
 
             return x
@@ -307,8 +177,8 @@ class MAMLParticles(MetaNetwork):
                 A m x m torch tensor representing the kernel.
             """
 
-            x = pv - pv.transpose(0, 1)
-            x = 1 + x.norm(2, dim=2).pow(2)
+            x = pv - pv.transpose(1, 2)
+            x = - x.norm(2, dim=3).pow(2)
             x = 1 / x
 
             return x
@@ -320,9 +190,117 @@ class MAMLParticles(MetaNetwork):
 
         kernel = kernel_functions[self.kernel_function]
 
-        return kernel(parameter_vectors)
+        return kernel(weights)
 
-    def svgd(self, dataset, parameters, update_type='chaser'):
+    @staticmethod
+    def compute_predictions(features, parameters):
+        """
+
+        Parameters
+        ----------
+        features: torch.Tensor
+            B * N * D tensor representing the features.
+        parameters: torch.Tensor
+            B * M * (D + 3) tensor representing the M particles
+            (including the bias-feature trick and two kappa vectors).
+
+        Returns
+        -------
+        predictions: torch.Tensor
+            B * M * N tensor, representing the predictions.
+        """
+        # Obtains the weights
+        weights = parameters[..., 2:]
+
+        # Implements the bias-feature trick
+        features = torch.cat((features, torch.ones_like(features[..., :1])), dim=2)
+
+        predictions = torch.bmm(weights, features.transpose(1, 2))
+
+        return predictions
+
+    def compute_mean_std(self, features, parameters):
+        """
+
+        Parameters
+        ----------
+        features: torch.Tensor
+            B * N * D tensor representing the features.
+        parameters: torch.Tensor
+            B * M * (D + 3) tensor representing the M particles
+            (including the bias-feature trick and two kappa vectors).
+
+        Returns
+        -------
+        predictions: torch.Tensor
+            B * M * N tensor, representing the predictions.
+        """
+        # Obtains the kappas (B * M)
+        kappa_likelihood = parameters[..., 0]
+
+        # Computes the predictions (B * M * N)
+        predictions = self.compute_predictions(features, parameters)
+
+        # Transposes the predictions to B * N * M
+        predictions = predictions.transpose(1, 2)
+
+        # Computes the mean
+        mean = predictions.mean(dim=2)
+
+        # Adds the variability
+        variability = torch.randn((*predictions.size(), self.n_samples)).to(mean.device)
+        variability = variability / kappa_likelihood.unsqueeze(1).unsqueeze(3).pow(.5)
+        predictions = predictions.unsqueeze(3) + variability
+
+        # Reshapes the predictions to B * N * (M x S), where S is the number of samples
+        predictions = predictions.view(*predictions.shape[:2], -1)
+
+        # mean = predictions.mean(dim=2)
+        std = predictions.std(dim=2)
+
+        return mean, std
+
+    def posterior(self, predictions, targets, mask, weights, kappa_likelihood, kappa_prior):
+        r"""
+        Computes the posterior of the configuration.
+
+        Parameters
+        ----------
+        predictions: torch.Tensor
+            B * M * N tensor representing the prediction made by the network.
+        targets: torch.Tensor
+            B * N * 1 tensor representing the targets.
+        mask: torch.Tensor
+            B * N mask of the examples (some tasks have less than N examples).
+        weights: torch.Tensor
+            B * M * (D + 1) tensor representing the weights, including the bias-feature trick
+        kappa_likelihood: torch.Tensor:
+            B * M tensor representing $\kappa_{likelihood}$.
+        kappa_prior: torch.Tensor:
+            B * M tensor representing $\kappa_{prior}$.
+
+        Returns
+        -------
+        objective: torch.Tensor
+            B * M tensor, representing the posterior of each particle, for each batch.
+        """
+        # Computing the log-likelihood
+        log_likelihood = log_pdf(predictions - targets.transpose(1, 2), kappa_likelihood)  # B * M * N
+        log_likelihood = log_likelihood * mask.unsqueeze(1)  # Keep only the actual examples
+        log_likelihood = log_likelihood.sum(dim=2)
+
+        # We enforce a Gaussian prior on the weights
+        log_prior = log_pdf(weights[..., :-1], kappa_prior).sum(dim=2)
+
+        # Gamma prior on the kappas
+        log_prior_kappa = self.gamma_likelihood.log_prob(kappa_likelihood)
+        log_prior_kappa = log_prior_kappa + self.gamma_prior.log_prob(kappa_prior)
+
+        objective = log_likelihood + log_prior + log_prior_kappa
+
+        return objective
+
+    def svgd(self, features, targets, mask, parameters, update_type='chaser'):
         r"""
         Performs the Stein Variational Gradient Update on the particles.
 
@@ -336,104 +314,168 @@ class MAMLParticles(MetaNetwork):
 
         Parameters
         ----------
-        dataset: tuple
-            A tuple containing the dataset (data, labels).
+        features: torch.Tensor
+            B * N * D tensor. The precomputed features associated with the dataset.
+        targets: torch.Tensor
+            B * N * 1 tensor. The targets associated to the features. Useful to compute the posterior.
+        mask: torch.Tensor
+            B * N mask of the examples (some tasks have less than N examples).
         parameters: torch.Tensor
-            m_particles * nb_parameters tensor containing the full parameters.
+            B * M * (D + 3) tensor containing the full parameters, already expanded along a batch dimension.
         update_type: str, 'chaser' or 'leader'
             Defines which learning rate to use.
         """
 
-        expanded_parameters = parameters.unsqueeze(0).expand(self.m_particles, *parameters.size())
+        # Expands the parameters : B * M * (D + 3) -> B * M * M * (D + 3)
+        expanded_parameters = parameters.unsqueeze(1)
+        expanded_parameters = expanded_parameters.expand(
+            (parameters.size(0), self.m_particles, *parameters.shape[1:])
+        )
 
-        kernel = self.kernel(expanded_parameters)
+        # Splits the different parameters
+        kappa_likelihood = parameters[..., 0]
+        kappa_prior = parameters[..., 1]
+        weights = parameters[..., 2:]
 
-        objectives = torch.stack([
-            self.get_model(parameter).posterior(dataset)
-            for parameter in parameters
-        ])
+        expanded_weights = expanded_parameters[..., 2:]
 
+        # weights is B * M * (D + 1), features is B * N * D
+        # predictions is B * M * N
+        predictions = self.compute_predictions(features, parameters)
+
+        # B * M * M
+        kernel = self.kernel(expanded_weights)
+
+        # B * M
+        objectives = self.posterior(
+            predictions=predictions,
+            targets=targets,
+            mask=mask,
+            weights=weights,
+            kappa_likelihood=kappa_likelihood,
+            kappa_prior=kappa_prior,
+        )
+
+        # Computes the gradients for the objective (B * M * (D + 3))
         objective_grads = autograd.grad(objectives.sum(), parameters, create_graph=True)[0]
 
+        # Computes the gradients for the kernel, using the expanded parameters (B * M * M * (D + 3))
         kernel_grads = autograd.grad(kernel.sum(), expanded_parameters, create_graph=True)[0]
 
-        gradient = kernel @ objective_grads + kernel_grads.mean(dim=1)
+        # Computes the update
+        # The matmul term multiplies batches of matrices that are B * M * M and B * M * (D + 3)
+        update = torch.matmul(kernel, objective_grads) / self.m_particles + kernel_grads.mean(dim=2)
 
-        new_parameters = parameters + self.lr[update_type] * gradient
+        # Performs the update
+        new_parameters = parameters + self.lr[update_type] * update
 
         # We need to make sure that the kappas remain in the right range for numerical stability
         new_parameters = torch.cat([
-            torch.clamp(new_parameters[:, :2], min=1e-8),
-            new_parameters[:, 2:]
-        ], dim=1)
+            torch.clamp(new_parameters[..., :2], min=1e-8),
+            new_parameters[..., 2:]
+        ], dim=2)
 
         return new_parameters
 
-    def __forward(self, episode):
+    def forward(self, episodes, train=None, test=None, query=None, trim_ends=True):
+        """
+        Performs a forward and backward pass on a single episode.
+        To keep memory load low, the backward pass is done simultaneously.
 
-        d_train = episode['Dtrain']
-        d_test = episode['Dtest']
-        d_full = (
-            torch.cat((d_train[0], d_test[0])),
-            torch.cat((d_train[1], d_test[1])),
-        )
+        Parameters
+        ----------
+        episodes: list
+            A batch of meta-learning episodes.
+        train: dataset
+            The train dataset.
+        test: dataset
+            The test dataset.
+        query: dataset
+            The query dataset.
+        trim_ends: bool
+            Whether to trim the results.
+
+        Returns
+        -------
+        results: list(tuple)
+            A list of tuples containing the mean and standard deviation computed by the network
+            for each episodes.
+        query_results: list(tuple)
+            A list of tuples containing the mean and standard deviation computed by the network
+            for each episodes of the query set.
+        """
+
+        if episodes is not None:
+            train, test = pack_episodes(episodes, return_ys_test=True,
+                                        return_query=False)
+            x_test, y_test, len_test, mask_test = test
+            query = None
+        else:
+            assert (train is not None) and (test is not None)
+            x_test, len_test, mask_test = test
+
+        # x is B * N * D dimensional, y is B * N * 1 dimensional
+        x_train, y_train, len_train, mask_train = train
+
+        b, n, d = x_train.size()
+
+        train_features = self.feature_extractor(x_train.reshape(-1, d)).reshape(b, -1, self.fe_output_dim)
+        test_features = self.feature_extractor(x_test.reshape(-1, d)).reshape(b, -1, self.fe_output_dim)
+
+        # Expands the parameters along the batch dimension : M * (D + 3) -> B * M * (D + 3)
+        parameters = self.particles.unsqueeze(0).expand((b, *self.particles.size()))
 
         with autograd.enable_grad():
             # Initialise the chaser as a new tensor
-            chaser = self.particles + 0.
+            chaser = parameters + 0.
             for i in range(self.n_epochs_chaser):
-                chaser = self.svgd(d_train, parameters=chaser, update_type='chaser')
+                chaser = self.svgd(train_features, y_train, mask_train, parameters=chaser, update_type='chaser')
 
-            leader = chaser + 0.
-            for i in range(self.s_epochs_leader):
-                leader = self.svgd(d_full, parameters=leader, update_type='leader')
+            if self.training and not self.use_mse:
+                full_features = torch.cat((train_features, test_features), dim=1)
+                y_full = torch.cat((y_train, y_test), dim=1)
+                mask_full = torch.cat((mask_train, mask_test), dim=1)
 
-        # Added stability (according to Taesup)
-        loss = (leader.detach() - chaser)[:, 2:].pow(2).sum()
+                leader = chaser + 0.
+                for i in range(self.s_epochs_leader):
+                    leader = self.svgd(full_features, y_full, mask_full, parameters=leader, update_type='leader')
 
-        # We compute the backward pass here to minimise the load on memory.
-        if self.training:
-            loss.backward()
+                # Added stability
+                self.loss = (leader.detach() - chaser)[..., 2:].pow(2).sum() / b
 
         with autograd.enable_grad():
             for i in range(self.n_epochs_predict):
-                chaser = self.svgd(d_train, parameters=chaser, update_type='chaser')
+                chaser = self.svgd(train_features, y_train, mask_train, parameters=chaser, update_type='chaser')
 
-        test_prediction = torch.stack([
-            self.get_model(parameter).step(d_test)
-            for parameter in chaser
-        ]).mean(dim=0)
+        # Computes the mean and standard deviation
+        mean, std = self.compute_mean_std(test_features, chaser)
 
-        test_variance = torch.stack([
-            self.get_model(parameter).step(d_test)
-            for parameter in chaser
-        ]).var(dim=0)
+        # Unsqueezes the results to keep the same shape as the targets
+        mean = mean.unsqueeze(2)
+        std = std.unsqueeze(2)
 
-        return loss, test_prediction, test_variance
+        # Re-organises the results in the episodic form
+        mean = [m[:n] for m, n in zip(mean, len_test)]
+        std = [s[:n] for s, n in zip(std, len_test)]
 
-    def forward(self, episodes):
-        return [self.__forward(episode) for episode in episodes]
+        results = [(m[:n], s[:n]) for m, s, n in zip(mean, std, len_test)] if trim_ends else (mean, std)
 
-    def predict(self, episode):
+        if query is None:
+            return results
 
-        d_train = episode['Dtrain']
-        d_test = episode['Dtest']
+        x_query, _, len_query, mask_query = query
 
-        with autograd.enable_grad():
-            # Initialise the chaser as a new tensor
-            chaser = self.particles + 0.
-            for i in range(self.n_epochs_predict):
-                chaser = self.svgd(d_train, parameters=chaser, update_type='chaser')
+        query_features = self.feature_extractor(x_query.reshape(-1, d)).reshape(b, -1, self.fe_output_dim)
 
-        predictions = torch.stack([
-            self.get_model(parameter).step(d_test)
-            for parameter in chaser
-        ])
+        mean, std = self.compute_mean_std(query_features, chaser)
 
-        y_preds = predictions.mean(dim=0)
-        y_var = predictions.var(dim=0)
+        # Unsqueezes the results to keep the same shape as the targets
+        mean = mean.unsqueeze(2)
+        std = std.unsqueeze(2)
 
-        return y_preds, y_var
+        query_results = [(m[:n], s[:n]) for m, s, n in zip(mean, std, len_test)] if trim_ends else (mean, std)
+
+        return results, query_results
 
 
 class BMAML(MetaLearnerRegression):
@@ -442,80 +484,41 @@ class BMAML(MetaLearnerRegression):
         super(BMAML, self).__init__(network, optimizer, lr, weight_decay)
 
     def _compute_aux_return_loss(self, y_preds, y_tests):
-        losses = [y[0] for y in y_preds]
-        predictions = [y[1] for y in y_preds]
-
-        loss = torch.stack(tuple(losses)).sum()
-        # mse = mse_loss(torch.cat(tuple(predictions)), torch.cat(tuple(y_tests)))
-
-        mse = torch.stack([mse_loss(y_p, y_t) for y_p, y_t in zip(predictions, y_tests)]).mean()
-
-        return loss, dict(chaser_loss=loss, mse=mse)
-
-    def make_prediction(self, episodes):
-        return [self.model.predict(episode) for episode in episodes]
-
-    def _score_episode(self, episode, y_test, metrics, return_data=False, **kwargs):
-        with torch.no_grad():
-            x_train, y_train = episode['Dtrain']
-            y_pred, _ = self.model.predict(episode)
-        res = dict(test_size=y_pred.shape[0], train_size=y_train.shape[0])
-        res.update({metric.__name__: to_unit(metric(y_pred, y_test)) for metric in metrics})
-
-        if return_data:
-            x_test, y_test = episode['Dtest']
-
-            data = {
-                'x_train': x_train,
-                'y_train': y_train,
-                'x_test': x_test,
-                'y_test': y_test,
-                'y_pred': y_pred
-            }
-
-            return res, data
-
-        return res
-
-    def _fit_batch(self, x, y, *, callback=Callback(), step=None, return_pred=False):
         """
-        Since BMAML is so memory-intensive and the computations cannot be parallelised anyway,
-        the backward steps are made in the forward to make sure that the buffers are finally freed.
+        Computes different metrics such as the loss and the MSE.
 
-        To keep the advantages of batch computations (ie stabilise the gradient), the optimiser
-        is only called after the whole "batch".
+        Notes
+        -----
+        In the case of BMAML, we need to do early stopping based on the MSE loss
+        and not the chaser loss (which is not computed at evaluation time anyway).
 
         Parameters
         ----------
-        x
-        y
-        callback
-        step
-        return_pred
+        y_preds: list(tuple)
+            The predictions returned by the forward method of the model.
+        y_tests: list(torch.Tensor)
+            The targets associated with the prediction.
 
         Returns
         -------
-
+        loss: torch.Tensor
+            Depending on the mode (training or evaluation), either the chaser loss or the MSE loss.
+        metrics: dict
+            A dictionary containing relevant metrics to be plotted
+            (MSE and R2, as well as chaser loss during training).
         """
 
-        loss_tensor, metrics, pred_y = self._compute_loss_and_metrics(
-            x, y, return_loss_tensor=True, return_pred=return_pred
-        )
-        # if hasattr(self, 'grad_flow'):
-        #     self.grad_flow.on_backward_start(step, loss_tensor)f
-        # loss_tensor.backward()
+        mean, std = list(zip(*y_preds))
 
-        callback.on_backward_end(step)
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+        mse = torch.stack([mse_loss(pred, target) for pred, target in zip(mean, y_tests)]).mean()
+        r2 = np.mean([r2_score(pred.detach().cpu(), target.cpu()) for pred, target in zip(mean, y_tests)])
 
-        # # We need to make sure that the kappas remain in the right range for numerical stability
-        # parameters = self.model.particles
-        # new_parameters = torch.cat([
-        #     torch.clamp(parameters[:, :2], min=1e-8),
-        #     parameters[:, 2:]
-        # ], dim=1)
-        # self.model.particles = nn.Parameter(new_parameters)
+        if self.model.training and not self.model.use_mse:
+            loss = self.model.loss
+            metrics = dict(chaser_loss=loss, mse=mse, r2=r2)
+        else:
+            # During evaluation, we want to return the MSE loss.
+            loss = mse
+            metrics = dict(mse=mse, r2=r2)
 
-        loss = float(loss_tensor)
-        return loss, metrics, pred_y
+        return loss, metrics

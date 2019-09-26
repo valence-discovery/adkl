@@ -117,7 +117,7 @@ class TaskEncoderNet(MetaNetwork):
         return compute_cos_similarity(phis_test, phis_train)
 
 
-class MetaKrrMKNetwork2(MetaNetwork):
+class ADKL_KRR_net(MetaNetwork):
     TRAIN = 0
     DESCR = 1
     BOTH = 2
@@ -131,7 +131,7 @@ class MetaKrrMKNetwork2(MetaNetwork):
         """
         In the constructor we instantiate an lstm module
         """
-        super(MetaKrrMKNetwork2, self).__init__()
+        super(ADKL_KRR_net, self).__init__()
 
         if condition_on.lower() in ['train', 'train_samples']:
             assert dataset_encoder_params is not None, 'dataset_encoder_params must be specified'
@@ -357,14 +357,14 @@ class MetaKrrMKNetwork2(MetaNetwork):
         self.task_encoder_loss = loss
 
 
-class MetaKrrMKLearner2(MetaLearnerRegression):
+class ADKL_KRR(MetaLearnerRegression):
     def __init__(self, *args, optimizer='adam', lr=0.001, weight_decay=0.0,
                  **kwargs):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        network = MetaKrrMKNetwork2(*args, **kwargs, device=device)
+        network = ADKL_KRR_net(*args, **kwargs, device=device)
 
-        super(MetaKrrMKLearner2, self).__init__(network, optimizer, lr,
-                                                weight_decay)
+        super(ADKL_KRR, self).__init__(network, optimizer, lr,
+                                       weight_decay)
 
     def _compute_aux_return_loss(self, y_preds, y_tests):
         res = dict()
@@ -386,9 +386,9 @@ class MetaKrrMKLearner2(MetaLearnerRegression):
         return loss, res
 
 
-class MetaGPMKNetwork2(MetaKrrMKNetwork2):
+class ADKL_GP_net(ADKL_KRR_net):
     def __init__(self, *args, std_annealing_steps=0, **kwargs):
-        super(MetaGPMKNetwork2, self).__init__(*args, **kwargs)
+        super(ADKL_GP_net, self).__init__(*args, **kwargs)
         # the number of steps for which the std is put small to put emphasize on the mean
         self.std_annealing_steps = std_annealing_steps
         self.step = 0
@@ -476,13 +476,13 @@ class MetaGPMKNetwork2(MetaKrrMKNetwork2):
             return test_res
 
 
-class MetaGPMKLearner2(MetaLearnerRegression):
+class ADKL_GP(MetaLearnerRegression):
     def __init__(self, *args, optimizer='adam', lr=0.001, weight_decay=0.0,
                  **kwargs):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        network = MetaGPMKNetwork2(*args, **kwargs, device=device)
-        super(MetaGPMKLearner2, self).__init__(network, optimizer, lr,
-                                               weight_decay)
+        network = ADKL_GP_net(*args, **kwargs, device=device)
+        super(ADKL_GP, self).__init__(network, optimizer, lr,
+                                      weight_decay)
 
     def _compute_aux_return_loss(self, y_preds, y_tests):
         def nll(mu, std, y):

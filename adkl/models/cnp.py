@@ -1,12 +1,9 @@
 import torch
-from torch.optim import Adam
 from torch.nn.functional import mse_loss, softplus, cross_entropy
-from torch.nn import MSELoss, Parameter, ParameterDict, Sequential, ReLU
 from torch.distributions.normal import Normal
-from poutyne.framework import Model
 from adkl.feature_extraction import FeaturesExtractorFactory, FcFeaturesExtractor
 from .base import MetaLearnerRegression, MetaNetwork
-from .utils import to_unit, pack_episodes, compute_cos_similarity
+from .utils import pack_episodes, compute_cos_similarity
 from torch import nn
 
 
